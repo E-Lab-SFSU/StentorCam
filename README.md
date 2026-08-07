@@ -74,6 +74,14 @@ meaningful.
 
 ### 2. Standalone Python/OpenCV workflow (automatic)
 
+> **Note:** the descriptions below (`stentTrack.py`, `multiTest.py`) reflect
+> an earlier snapshot of this workflow's logic and are kept here for
+> historical context. The files currently uploaded to the repo implement
+> the same ideas as Colab notebooks — see
+> [§3 Colab notebook pipeline](#3-colab-notebook-pipeline-currently-uploaded)
+> below for what's actually in the repo today, including the CSV export
+> that used to be missing.
+
 ```
 video (mp4)
   → stentTrack.py   (single cell)      → CSV + ffmpeg overlay video
@@ -130,6 +138,80 @@ direction_deg, contour`) does not match what `full_data_plot.py` /
 today there is no script that takes either Python tracker's output straight
 into the plotting scripts without a manual reformatting step.
 
+### 3. Colab notebook pipeline (currently uploaded)
+
+This is the workflow actually present in the repo today, as five Colab
+notebooks meant to be run top-to-bottom in order. Each notebook follows the
+same `#@title`-form-cell convention (install cell → helper cells → a final
+hardcoded-path run cell), so cells can be collapsed and run in sequence
+without editing code, only the constants at the top of the last cell.
+
+```
+video (mp4)
+  → ROI_Selector.ipynb      (click 3 points on frame 1 → circular ROI:
+                                center + radius, saved to roi_config.json)
+  → stentorDetect2.ipynb      (multi-cell background-subtraction detector +
+                                Hungarian-algorithm tracker + gap-fill/merge-
+                                split correction sweep + optional n_cells
+                                enforcement → tracks CSV + ffmpeg debug
+                                overlay video)
+  → trackID_Overlay.ipynb   (re-renders a clean fading-trail overlay for a
+                                chosen subset of TRACK_IDs from that CSV,
+                                with an optional on-screen laser-on/off
+                                indicator)
+  → multiParams.ipynb         (per-track pose/head-tail/motion-direction
+                                analysis on the tracks CSV → analyzed CSV
+                                with pose, movement, direction_deg columns
+                                appended)
+  → overlayMultiParams.ipynb  (renders the analyzed CSV's pose box, long-
+                                axis line, and head/tail markers back onto
+                                the source video)
+```
+
+- **`ROI_Selector.ipynb`** — loads the first frame of a video, then uses
+  an HTML5 canvas + `google.colab.output.register_callback` (in place of
+  Plotly's `FigureWidget.on_click`, which doesn't reliably fire in Colab's
+  widget manager) to let you click 3 points on the well boundary. Fits a
+  circle through those points and writes `roi_config.json`
+  (`roi_cx`, `roi_cy`, `roi_r`) for the next notebook to consume.
+- **`stentorDetect2.ipynb`** — the multi-cell detector/tracker/corrector
+  (Pass 1 detection → Pass 1b Hungarian-algorithm identity assignment →
+  Pass 2 correction sweep → optional Pass 2b `n_cells` enforcement →
+  Pass 3 overlay render), matching the pipeline described for `multiTest.py`
+  above, **plus a CSV export** (`export_tracks_csv`, columns `TRACK_ID`,
+  `FRAME`, `POSITION_X`, `POSITION_Y`, `contour_points`) that the earlier
+  script didn't have. This closes the "no CSV" gap noted below/in the
+  earlier snapshot. Supports both Otsu and Bernsen local thresholding.
+- **`trackID_Overlay.ipynb`** — loads that tracks CSV back in and renders
+  a second overlay video restricted to chosen `TRACK_IDS`, adding a fading
+  motion trail per track and a "LIGHT ON" indicator over a configurable
+  laser-on/off time window. Independent of `stentorDetect2.ipynb`'s own
+  debug overlay — this one is meant as a cleaner, presentation-ready render.
+- **`multiParams.ipynb`** *(new — converted from `multiParams.py` in this
+  update)* — walks the tracks CSV one `track_id` at a time and replays
+  `stentTrack.py`'s single-cell classification logic (ellipse/aspect-ratio
+  pose call, contour-width head/tail split, rolling 6-frame motion
+  direction) independently per track, so a multi-cell video gets the same
+  per-cell morphology/motion labels a single-cell video would. Appends
+  `pose`, `movement`, and `direction_deg` columns and writes an analyzed
+  CSV. Previously a CLI script (`argparse`, `--input`/`--output`); the
+  notebook version replaces the CLI with an install cell and a hardcoded
+  `INPUT_CSV`/`OUTPUT_CSV` run cell, matching the other notebooks' style.
+- **`overlayMultiParams.ipynb`** *(new — converted from
+  `overlayMultiParams.py` in this update)* — reads the analyzed CSV and
+  draws each detection's oriented bounding box, long axis, head/tail-split
+  line, and (for `ELONGATED` poses) head/tail centroid markers onto the
+  source video via plain `cv2.VideoWriter` (no `ffmpeg` compositing step,
+  unlike the other three notebooks). Also burns in the `TRACK_ID`, pose,
+  movement, and direction-in-degrees as text per detection. Same CLI→
+  hardcoded-cell conversion as `multiParams.ipynb`.
+
+Unlike workflow 1, this pipeline **is** self-consistent end to end: each
+notebook's output format is exactly what the next one expects, with no
+manual reformatting step. It still doesn't interoperate with workflow 1's
+CSV shape or plotting scripts (`full_data_plot.py`/`track_plot.py`) — see
+Known gaps.
+
 ---
 
 ## Relationship to RoboCam 3.1
@@ -165,22 +247,65 @@ repo yet.
   required to run `stentor_preprocess.ijm` and produce its CSV exports.
   Entirely manual, not scriptable from this repo.
 
+### Colab notebook pipeline (§3)
+
+Each notebook installs its own dependencies in its first cell via `!pip`/
+`!apt-get`, so nothing extra needs to be pre-installed to run them in
+Google Colab:
+
+- `opencv-python-headless` — all five notebooks
+- `numpy` — all five notebooks
+- `pandas` — `multiParams.ipynb`, `overlayMultiParams.ipynb`
+- `tqdm` — `stentorDetect2.ipynb`, `multiParams.ipynb`
+- `scipy` — `stentorDetect2.ipynb` only (`linear_sum_assignment`)
+- `matplotlib` — `ROI_Selector.ipynb` (frame preview only)
+- `ffmpeg` — external binary, `apt-get`-installed by `stentorDetect2.ipynb`
+  and `trackID_Overlay.ipynb`; invoked via `subprocess.run` to composite
+  the PNG overlay sequence back onto the source video. `overlayMultiParams.
+  ipynb` writes video directly with `cv2.VideoWriter` instead, so it does
+  not need `ffmpeg`.
+- `google.colab` (`drive`, `output`, `files`) — Colab-only; used for Drive
+  mounting (`stentorDetect2.ipynb`, `trackID_Overlay.ipynb`) and the
+  click-to-select-ROI callback (`ROI_Selector.ipynb`). These notebooks
+  will not run as-is outside Colab without stubbing these out.
+
 ## Known gaps
 
 - No automated tests.
-- No dependency manifest (`requirements.txt` etc.).
-- `multiTest.py`'s filename doesn't match its own documented identity
-  (`contour_video.py`).
-- `multiTest.py` produces no CSV, only a rendered overlay video — its
-  richer per-cell tracking data (including which frames were gap-filled,
-  merge-split, or forced) isn't persisted anywhere outside the process.
-- The two plotting scripts hardcode fps (30), a px/mm calibration (56.25),
-  and a fixed 2700-frame/90 s recording length with laser-on window at
-  frames 900–1800 — none of this is derived from the input CSV or exposed
-  as a CLI argument, so a different frame rate, recording duration, or
-  camera zoom silently produces a mislabeled/wrong-scale plot rather than
-  an error.
-- No script bridges `stentTrack.py`'s or `multiTest.py`'s output into the
-  CSV shape `full_data_plot.py`/`track_plot.py` expect.
+- No dependency manifest (`requirements.txt` etc.) — the Colab notebooks
+  sidestep this by installing their own dependencies in-cell, but that
+  only works inside Colab.
+- ~~`multiTest.py` produces no CSV, only a rendered overlay video~~ —
+  resolved in `stentorDetect2.ipynb`, which now calls `export_tracks_csv`
+  after the correction sweep, so `TRACK_ID`/`FRAME`/`POSITION_X`/
+  `POSITION_Y`/`contour_points` are persisted for downstream use (feeding
+  `trackID_Overlay-2.ipynb`, `multiParams.ipynb`, and
+  `overlayMultiParams.ipynb`). It still doesn't record *which* frames were
+  gap-filled, merge-split, soft-recovered, or forced — the `corrected`
+  label used to pick the overlay's drawing style in
+  `stentorDetect2.ipynb`'s `draw_overlay` is not one of the exported
+  columns.
+- The Fiji-workflow plotting scripts (`full_data_plot.py`, `track_plot.py`)
+  still hardcode fps (30), a px/mm calibration (56.25), and a fixed
+  2700-frame/90 s recording length with laser-on window at frames
+  900–1800 — none of this is derived from the input CSV or exposed as a
+  CLI argument, so a different frame rate, recording duration, or camera
+  zoom silently produces a mislabeled/wrong-scale plot rather than an
+  error. The Colab notebook pipeline (§3) sidesteps this for the laser
+  window specifically — `trackID_Overlay.ipynb` takes
+  `LASER_ON_TIME`/`LASER_OFF_TIME` in seconds and converts using the
+  video's own fps — but has no equivalent px/mm calibration or plotting
+  step of its own yet.
+- The two workflows still don't interoperate: nothing converts the Colab
+  pipeline's tracks CSV (§3) into the Fiji/TrackMate fixed-column layout
+  `full_data_plot.py`/`track_plot.py` expect, or vice versa.
+- `ROI_Selector.ipynb`'s ROI selection is still a fully manual
+  click-3-points step per video; nothing detects the well boundary
+  automatically.
+- `multiParams.ipynb` and `overlayMultiParams.ipynb` were converted from
+  CLI scripts (`argparse`, `--input`/`--output`/`--video`/`--csv`) to
+  Colab notebooks with hardcoded path variables in this update — like the
+  rest of the pipeline, running them on a different file means editing the
+  constants in the last cell rather than passing flags.
 - No existing path consumes RoboCam 3.1's raw `.npy` well-stacks directly —
   everything here starts from an already-encoded video or PNG sequence.
